@@ -12,7 +12,7 @@
 ## Требования
 
 - Python 3.10+
-- aiogram 3.15.0
+- aiogram 3.3.0
 - python-dotenv 1.0.1
 
 ## Установка
