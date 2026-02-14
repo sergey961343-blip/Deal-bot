@@ -63,7 +63,44 @@ def format_number(number: float) -> str:
     """Форматирует число с запятой как десятичным разделителем"""
     return f"{number:,.3f}".replace(',', ' ').replace('.', ',')
 
+def try_parse_4_lines(text: str):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) != 4:
+        return None
 
+    rate_raw, req, bank, amount_raw = lines
+
+    rate = parse_number(rate_raw)
+    amount = parse_number(amount_raw)
+
+    if rate is None or amount is None:
+        return None
+    if rate <= 0 or amount <= 0:
+        return None
+
+    return rate, req, bank, amount
+    @dp.message(F.text)
+async def one_message_calc(message: Message, state: FSMContext):
+    parsed = try_parse_4_lines(message.text)
+    if not parsed:
+        return
+
+    rate, req, bank, amount = parsed
+    result = amount / rate
+
+    await state.clear()
+
+    text = (
+        "✅ Сделка рассчитана\n"
+        f"🏦 Банк: {bank}\n"
+        f"💳 Реквизит: {req}\n"
+        f"📈 Курс: {format_number(rate)}\n"
+        f"💰 Сумма: {format_number(amount)}\n"
+        f"🧮 {format_number(amount)} / {format_number(rate)} = {format_number(result)}\n\n"
+        "Для нового расчёта отправь снова 4 строки или /start"
+    )
+
+    await message.answer(text)
 @dp.message(Command('start'))
 async def cmd_start(message: Message, state: FSMContext):
     """Обработчик команды /start"""
