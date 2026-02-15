@@ -4,9 +4,12 @@ import os
 import re
 from datetime import date
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram import Bot, Dispatcher
+from aiogram.types import (
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,21 +22,20 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Хранилище итогов в памяти (на Render при рестарте обнулится)
-# Структура: { (chat_id, yyyy-mm-dd): {"count": int, "rub": float, "usdt": float} }
+# Итоги в памяти: (user_id, yyyy-mm-dd) -> {"count": int, "rub": float, "usdt": float}
+# Важно: при рестарте Render всё обнулится. Для постоянного хранения нужен SQLite/Redis.
 totals = {}
 
 
 def parse_number(text: str) -> float | None:
     """
     Достаёт число из строки.
-    Поддержка: "76", "76.5", "76,5", "14к", "36 500", "36500р"
+    Поддерживает: "76", "76.5", "76,5", "14к", "36 500", "36500р"
     """
     t = text.strip().lower().replace(" ", "").replace(",", ".")
 
     mult = 1.0
-    # 14к = 14000
-    if "к" in t:
+    if "к" in t:  # 14к = 14000
         mult = 1000.0
         t = t.replace("к", "")
 
@@ -65,7 +67,6 @@ def try_parse_4_lines(text: str):
         return None
 
     rate_raw, req, bank, amount_raw = lines
-
     rate = parse_number(rate_raw)
     amount_rub = parse_number(amount_raw)
 
@@ -78,29 +79,14 @@ def try_parse_4_lines(text: str):
     return rate, req, bank, amount_rub, amount_usdt
 
 
-def day_key(chat_id: int):
-    return (chat_id, str(date.today()))
+def key_today(user_id: int):
+    return (user_id, str(date.today()))
 
 
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "Отправь одним сообщением 4 строки:\n"
-        "1) курс\n2) реквизит\n3) банк\n4) сумма (руб)\n\n"
-        "Пример:\n"
-        "76\n2200701002300314\nТинь\n36500\n\n"
-        "Команды:\n"
-        "/total — итоги за сегодня\n"
-        "/reset — обнулить итоги за сегодня"
-    )
-
-
-@dp.message(Command("total"))
-async def cmd_total(message: Message):
-    k = day_key(message.chat.id)
+def totals_text(user_id: int) -> str:
+    k = key_today(user_id)
     data = totals.get(k, {"count": 0, "rub": 0.0, "usdt": 0.0})
-
-    await message.answer(
+    return (
         "📊 Итоги за сегодня:\n"
         f"🧾 Сделок: {data['count']}\n"
         f"💰 RUB: {fmt3(data['rub'])}\n"
@@ -108,44 +94,115 @@ async def cmd_total(message: Message):
     )
 
 
-@dp.message(Command("reset"))
-async def cmd_reset(message: Message):
-    k = day_key(message.chat.id)
-    totals[k] = {"count": 0, "rub": 0.0, "usdt": 0.0}
-    await message.answer("✅ Итоги за сегодня обнулены.")
+@dp.inline_query()
+async def inline_handler(inline: InlineQuery):
+    q = (inline.query or "").strip()
 
+    # Команды inline
+    if q.lower() in {"total", "/total"}:
+        text = totals_text(inline.from_user.id)
+        results = [
+            InlineQueryResultArticle(
+                id="total_today",
+                title="📊 Итоги за сегодня",
+                description="Показать количество сделок, сумму RUB и сумму USDT",
+                input_message_content=InputTextMessageContent(message_text=text),
+            )
+        ]
+        await bot.answer_inline_query(
+            inline_query_id=inline.id,
+            results=results,
+            cache_time=0,
+            is_personal=True,
+        )
+        return
 
-@dp.message(F.text)
-async def handle_text(message: Message):
-    parsed = try_parse_4_lines(message.text)
+    if q.lower() in {"reset", "/reset"}:
+        totals[key_today(inline.from_user.id)] = {"count": 0, "rub": 0.0, "usdt": 0.0}
+        text = "✅ Итоги за сегодня обнулены."
+        results = [
+            InlineQueryResultArticle(
+                id="reset_today",
+                title="✅ Сбросить итоги",
+                description="Обнулить итоги за сегодня",
+                input_message_content=InputTextMessageContent(message_text=text),
+            )
+        ]
+        await bot.answer_inline_query(
+            inline_query_id=inline.id,
+            results=results,
+            cache_time=0,
+            is_personal=True,
+        )
+        return
+
+    # Расчёт заявки (4 строки)
+    parsed = try_parse_4_lines(q)
     if not parsed:
-        # Ничего не пишем, чтобы бот не флудил в группе.
-        # Если хочешь — могу включить подсказку при ошибке формата.
+        help_text = (
+            "Отправь 4 строки:\n"
+            "1) курс\n2) реквизит\n3) банк\n4) сумма (руб)\n\n"
+            "Пример:\n"
+            "76\n2200701002300314\nТинь\n36500\n\n"
+            "Команды:\n"
+            "total — итоги за день\n"
+            "reset — сброс итога"
+        )
+        results = [
+            InlineQueryResultArticle(
+                id="help",
+                title="ℹ️ Формат ввода",
+                description="Покажу пример, как отправлять заявку в 4 строки",
+                input_message_content=InputTextMessageContent(message_text=help_text),
+            )
+        ]
+        await bot.answer_inline_query(
+            inline_query_id=inline.id,
+            results=results,
+            cache_time=0,
+            is_personal=True,
+        )
         return
 
     rate, req, bank, amount_rub, amount_usdt = parsed
 
-    # Сохраняем в итоги дня
-    k = day_key(message.chat.id)
+    # копим итоги по пользователю
+    k = key_today(inline.from_user.id)
     if k not in totals:
         totals[k] = {"count": 0, "rub": 0.0, "usdt": 0.0}
-
     totals[k]["count"] += 1
     totals[k]["rub"] += amount_rub
     totals[k]["usdt"] += amount_usdt
 
-    await message.answer(
+    text = (
         "✅ Сделка рассчитана\n"
         f"📈 Курс: {fmt3(rate)}\n"
         f"💳 Реквизит: {req}\n"
         f"🏦 Банк: {bank}\n"
         f"💰 RUB: {fmt3(amount_rub)}\n"
-        f"💵 USDT: {fmt3(amount_usdt)}"
+        f"💵 USDT: {fmt3(amount_usdt)}\n\n"
+        "Чтобы увидеть итог: @Calculat3Bot total"
+    )
+
+    results = [
+        InlineQueryResultArticle(
+            id=f"calc_{inline.from_user.id}_{inline.id}",
+            title="✅ Рассчитать сделку",
+            description=f"USDT: {fmt3(amount_usdt)} | RUB: {fmt3(amount_rub)} | Курс: {fmt3(rate)}",
+            input_message_content=InputTextMessageContent(message_text=text),
+        )
+    ]
+
+    await bot.answer_inline_query(
+        inline_query_id=inline.id,
+        results=results,
+        cache_time=0,
+        is_personal=True,
     )
 
 
 async def main():
-    logging.info("Bot started")
+    logging.info("Inline bot started")
     await dp.start_polling(bot)
 
 
