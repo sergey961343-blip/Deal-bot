@@ -2,88 +2,54 @@ import asyncio
 import logging
 import os
 import re
-
 from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
 from aiogram.filters import Command
-from aiogram.types import Message
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+from uuid import uuid4
 
-# ====== CONFIG ======
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set. Add it to Render Environment Variables.")
-
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
 
-HELP_TEXT = (
-    "🧮 Формат (одним сообщением, 4 строки):\n\n"
-    "1) Курс (пример: 76 / 76.5 / 76,5 / '76 курс')\n"
-    "2) Реквизит (любой текст)\n"
-    "3) Банк (любой текст)\n"
-    "4) Сумма (пример: 36500 / 36 500)\n\n"
-    "Пример:\n"
-    "76 курс\n"
-    "2200701002300314\n"
-    "Тинь\n"
-    "36500"
-)
 
-# ====== HELPERS ======
-def parse_number(text: str) -> float | None:
-    """Extract first number from text. Supports spaces and comma as decimal separator."""
-    cleaned = text.strip().replace(" ", "").replace(",", ".")
-    m = re.search(r"\d+(\.\d+)?", cleaned)
-    if not m:
-        return None
-    try:
-        return float(m.group(0))
-    except ValueError:
+def parse_number(text: str):
+    cleaned = text.replace(" ", "").replace(",", ".")
+    match = re.search(r"\d+\.?\d*", cleaned)
+    if match:
+        return float(match.group())
+    return None
+
+
+def format_number(number: float) -> str:
+    return f"{number:,.3f}".replace(",", " ").replace(".", ",")
+
+
+def try_parse(text: str):
+    parts = text.strip().split()
+    if len(parts) < 4:
         return None
 
+    rate = parse_number(parts[0])
+    amount = parse_number(parts[-1])
 
-def format_number(n: float) -> str:
-    """Format with space thousands separator and comma decimal separator, 3 decimals."""
-    return f"{n:,.3f}".replace(",", " ").replace(".", ",")
-
-
-def try_parse_4_lines(text: str):
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) != 4:
+    if not rate or not amount or rate <= 0 or amount <= 0:
         return None
 
-    rate_raw, req, bank, amount_raw = lines
-    rate = parse_number(rate_raw)
-    amount = parse_number(amount_raw)
+    requisites = parts[1]
+    bank = " ".join(parts[2:-1])
 
-    if rate is None or amount is None:
-        return None
-    if rate <= 0 or amount <= 0:
-        return None
-
-    return rate, req, bank, amount
+    return rate, requisites, bank, amount
 
 
-# ====== HANDLERS ======
-@dp.message(Command("start"))
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    await message.answer(HELP_TEXT)
+@dp.inline_query()
+async def inline_calc(query: InlineQuery):
+    parsed = try_parse(query.query)
 
-
-@dp.message(F.text)
-async def one_message_calc(message: Message):
-    parsed = try_parse_4_lines(message.text)
     if not parsed:
-        await message.answer(
-            "❌ Не понял формат.\n\n"
-            f"{HELP_TEXT}\n\n"
-            "Отправь данные одним сообщением в 4 строки."
-        )
         return
 
     rate, req, bank, amount = parsed
@@ -95,14 +61,30 @@ async def one_message_calc(message: Message):
         f"💳 Реквизит: {req}\n"
         f"📈 Курс: {format_number(rate)}\n"
         f"💰 Сумма: {format_number(amount)}\n"
-        f"🧮 {format_number(amount)} / {format_number(rate)} = {format_number(result)}\n\n"
-        "Для нового расчёта отправь снова 4 строки."
+        f"🧮 {format_number(amount)} / {format_number(rate)} = {format_number(result)}"
     )
-    await message.answer(text)
+
+    await query.answer(
+        results=[
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="Рассчитать сделку",
+                input_message_content=InputTextMessageContent(message_text=text),
+            )
+        ],
+        cache_time=1
+    )
+
+
+@dp.message(Command("start"))
+async def start(message: Message):
+    await message.answer(
+        "👋 Напиши в любом чате:\n\n"
+        "@Calculat3Bot 76 2200701002300314 Тинь 36500"
+    )
 
 
 async def main():
-    logging.info("Bot started")
     await dp.start_polling(bot)
 
 
